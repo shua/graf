@@ -1,0 +1,11 @@
+usage: graf [-h|--help] <-u USER:PASS|-t TOKEN> URL [--from FROM] [--to TO] [--interval SECS] [-f]
+
+  select and print grafana dashboard panel to terminal
+
+  -u USER:PASS basic user password authentication
+  -t TOKEN     api token
+  URL          grafana base url
+  --from FROM, --to TO
+               time specifiers for grafana (defaults to now-1m, now)
+  INTERVAL    interval in seconds between frames (defaults to <terminal rows> / TO-FROM)
+  -f           follow, update data every INTERVAL seconds
