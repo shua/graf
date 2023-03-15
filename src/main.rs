@@ -1,4 +1,4 @@
-use std::process::Command;
+use std::io::Write as _;
 
 #[derive(Clone)]
 #[repr(transparent)]
@@ -218,7 +218,7 @@ fn main() {
             .as_secs(),
     )
     .unwrap();
-    const TS_ERRSTR: &'static str = "valid values for FROM/TO are RFC3339 datetime '20160201T130405', grafana relative 'now-5m', or unix epoch '1678864718'";
+    const TS_ERRSTR: &'static str = "valid values for FROM/TO are condensed ISO8601 UTC datetime '20160201T130405', grafana relative 'now-5m', or unix epoch '1678864718'";
     let from = from.as_ref().map(String::as_str).unwrap_or("now-5m");
     let mut from = match parse_instant(from, now) {
         Some(time) => time,
@@ -256,7 +256,7 @@ fn main() {
             if debug > 1 {
                 println!("-> get {graf:?} {urlarg:?} {args:?}");
             }
-            let output = Command::new("curl")
+            let output = std::process::Command::new("curl")
                 .args(&graf)
                 .arg(&urlarg)
                 .args(args)
@@ -291,8 +291,6 @@ fn main() {
         }};
     }
 
-    use std::io::Write as _;
-    let mut input = String::new();
     fn prompt<'v>(select_a: &str, vals: &'v [Value], keys: &[&str], buf: &mut String) -> &'v Value {
         use std::ops::Index as _;
         buf.clear();
@@ -316,9 +314,10 @@ fn main() {
             }
         }
     }
+    let mut input = String::new();
     let mut prompt = move |select_a, vals, keys| prompt(select_a, vals, keys, &mut input);
 
-    fn gettermsz() -> (u16, u16) {
+    fn get_termsz() -> (u16, u16) {
         let mut winsz = libc::winsize {
             ws_col: 10,
             ws_row: 10,
@@ -331,7 +330,7 @@ fn main() {
         (winsz.ws_row, winsz.ws_col)
     }
 
-    let (rows, cols) = gettermsz();
+    let (rows, cols) = get_termsz();
     if debug > 1 {
         println!("rows:{rows} cols:{cols}");
     }
