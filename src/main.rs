@@ -3,73 +3,6 @@ use std::process::Command;
 #[derive(Clone)]
 #[repr(transparent)]
 struct Value(serde_json::Value);
-enum ValueIter<'v> {
-    Once(Option<&'v serde_json::Value>),
-    Array(usize, &'v [serde_json::Value]),
-    Map(serde_json::map::Keys<'v>, &'v serde_json::Value),
-}
-
-#[derive(Clone)]
-enum Key<'v> {
-    Num(usize),
-    Str(&'v str),
-}
-
-impl std::fmt::Debug for Key<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Key::Num(n) => write!(f, "{n:?}"),
-            Key::Str(s) => write!(f, "{s:?}"),
-        }
-    }
-}
-
-impl std::fmt::Display for Key<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Key::Num(n) => write!(f, "{n}"),
-            Key::Str(s) => write!(f, "{s}"),
-        }
-    }
-}
-
-impl<'v> Iterator for ValueIter<'v> {
-    type Item = (Key<'v>, &'v Value);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            ValueIter::Once(v) => v
-                .map(|v| (Key::Num(0), unsafe { std::mem::transmute(v) }))
-                .take(),
-            &mut ValueIter::Array(i, vs) => match vs {
-                [] => None,
-                [hd, tl @ ..] => {
-                    *self = ValueIter::Array(i + 1, tl);
-                    Some((Key::Num(i), unsafe { std::mem::transmute(hd) }))
-                }
-            },
-            ValueIter::Map(ks, v) => ks
-                .next()
-                .map(|k| (Key::Str(k), unsafe { std::mem::transmute(&v[k]) })),
-        }
-    }
-}
-
-impl<'v> IntoIterator for &'v Value {
-    type Item = (Key<'v>, &'v Value);
-
-    type IntoIter = ValueIter<'v>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        use serde_json::Value::*;
-        match self.0 {
-            Null => ValueIter::Once(None),
-            Bool(_) | Number(_) | String(_) => ValueIter::Once(Some(&self.0)),
-            Array(ref vs) => ValueIter::Array(0, vs.as_slice()),
-            Object(ref vs) => ValueIter::Map(vs.keys(), &self.0),
-        }
-    }
-}
 
 impl Value {
     #[track_caller]
@@ -107,19 +40,19 @@ fn usage(short: bool) {
     if short {
         return;
     }
-    println!("");
-    println!("  select and print grafana dashboard panel to terminal");
-    println!("");
-    println!("  -u USER:PASS basic user password authentication");
-    println!("  -t TOKEN     api token");
-    println!("  URL          grafana base url");
-    println!("  --from FROM, --to TO");
-    println!("               time specifiers for grafana (defaults to now-1m, now)");
-    println!(
-        "  INTERVAL    interval in seconds between frames (defaults to <terminal rows> / TO-FROM)"
+    print!(
+        r#"
+  select and print grafana dashboard panel to terminal
+
+  -u USER:PASS basic user password authentication
+  -t TOKEN     api token
+  URL          grafana base url
+  --from FROM, --to TO
+               time specifiers for grafana (defaults to now-1m, now)
+  INTERVAL    interval in seconds between frames (defaults to <terminal rows> / TO-FROM)
+  -f           follow, update data every INTERVAL seconds
+"#
     );
-    println!("  -f           follow, update data every INTERVAL seconds");
-    println!("");
     println!(
         "{} {} by {}",
         env!("CARGO_PKG_NAME"),
@@ -285,12 +218,12 @@ fn main() {
             .as_secs(),
     )
     .unwrap();
-    let ts_errstr = "valid values for FROM,TO are 20160201T130405, now-5m, or unix timestamp";
+    const TS_ERRSTR: &'static str = "valid values for FROM/TO are RFC3339 datetime '20160201T130405', grafana relative 'now-5m', or unix epoch '1678864718'";
     let from = from.as_ref().map(String::as_str).unwrap_or("now-5m");
     let mut from = match parse_instant(from, now) {
         Some(time) => time,
         None => {
-            eprintln!("error: {ts_errstr}");
+            eprintln!("error: {TS_ERRSTR}");
             return;
         }
     };
@@ -302,7 +235,7 @@ fn main() {
     let mut to = match parse_instant(to, now) {
         Some(time) => time,
         None => {
-            eprintln!("error: {ts_errstr}");
+            eprintln!("error: {TS_ERRSTR}");
             return;
         }
     };
