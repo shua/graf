@@ -4,6 +4,17 @@ use std::io::Write as _;
 #[repr(transparent)]
 struct Value(serde_json::Value);
 
+impl std::fmt::Debug for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        <serde_json::Value as std::fmt::Debug>::fmt(&self.0, f)
+    }
+}
+impl std::fmt::Display for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        <serde_json::Value as std::fmt::Display>::fmt(&self.0, f)
+    }
+}
+
 impl Value {
     #[track_caller]
     fn i(&self) -> i64 {
@@ -35,7 +46,7 @@ impl<K: serde_json::value::Index> std::ops::Index<K> for Value {
 
 fn usage(short: bool) {
     println!(
-        "usage: graf [-h|--help] <-u USER:PASS|-t TOKEN> URL [--from FROM] [--to TO] [--interval SECS] [-f]"
+        "usage: graf [-h|--help] <-u USER:PASS|-t TOKEN> URL [--from FROM] [--to TO] [--interval SECS] [-f] [-d DASHBOARD] [-p PANEL]"
     );
     if short {
         return;
@@ -268,23 +279,19 @@ fn main() {
                 Ok(json) => {
                     if debug > 2 {
                         println!("<- json: {json}");
-                        if !output.stderr.is_empty() {
-                            use std::io::Write as _;
-                            std::io::stderr().write(&output.stderr).unwrap();
-                        }
+                        std::io::stderr().write(&output.stderr).unwrap();
                     }
                     Value(json)
                 },
                 Err(err) => {
-                    eprintln!("json ({url}): {err}");
-                    use std::io::Write as _;
-                    let mut stderr = std::io::stderr().lock();
+                    eprintln!("error: unable to parse json response ({url}): {err}");
                     if debug > 2 {
+                        let mut stderr = std::io::stderr().lock();
                         stderr.write(b"<- text: \"").unwrap();
                         stderr.write(&output.stdout).unwrap();
                         stderr.write(b"\"\n").unwrap();
                     }
-                    stderr.write(&output.stderr).unwrap();
+                    std::io::stderr().write(&output.stderr).unwrap();
                     std::process::exit(1);
                 }
             }
@@ -315,9 +322,20 @@ fn main() {
         }
     }
     let mut input = String::new();
-    let mut prompt = move |select_a, vals, keys| prompt(select_a, vals, keys, &mut input);
+    let mut prompt = move |select_a, vals, keys| {
+        if debug > 1 {
+            println!(
+                "prompt {select_a} from {}",
+                serde_json::to_string_pretty(unsafe {
+                    std::mem::transmute::<_, &[serde_json::Value]>(vals)
+                })
+                .unwrap()
+            );
+        }
+        prompt(select_a, vals, keys, &mut input)
+    };
 
-    fn get_termsz() -> (u16, u16) {
+    let (rows, cols) = {
         let mut winsz = libc::winsize {
             ws_col: 10,
             ws_row: 10,
@@ -328,21 +346,26 @@ fn main() {
         let ret = unsafe { libc::ioctl(1, libc::TIOCGWINSZ, &mut winsz as *mut _) };
         assert_eq!(ret, 0, "ioctl");
         (winsz.ws_row, winsz.ws_col)
-    }
-
-    let (rows, cols) = get_termsz();
+    };
     if debug > 1 {
         println!("rows:{rows} cols:{cols}");
     }
     let interval = interval.unwrap_or_else(|| (to - from) / i64::from(rows));
 
     let pageres = graf!("{url}/api/search?type=dash-db");
-    let dash = prompt("a dashboard", pageres.a(), &["title"]);
+    let dash = prompt("a dashboard", pageres.a(), &["title", "uid"]);
     let dashuid = dash["uid"].s();
     let dash = graf!("{url}/api/dashboards/uid/{dashuid}");
     let panels = &dash["dashboard"]["panels"];
     let panel = prompt("a panel", panels.a(), &["title"]);
-    let target = prompt("a target", panel["targets"].a(), &["refId"]);
+    let target = if panel.0.get("targets").is_some() {
+        prompt("a target", panel["targets"].a(), &["refId"]).clone()
+    } else if let Some(datasource) = panel.0.get("datasource") {
+        Value(serde_json::json!({ "datasource": datasource, "refId": "A" }))
+    } else {
+        eprintln!("error: cannot extract target from panel: {}", panel.0);
+        std::process::exit(1);
+    };
 
     let refid = target["refId"].s();
     let mut query = target.0.clone();
