@@ -52,8 +52,7 @@ fn usage(short: bool) {
         return;
     }
     print!(
-        r#"
-  select and print grafana dashboard panel to terminal
+        r#"  select and print grafana dashboard panel to terminal
 
   -u USER:PASS basic user password authentication
   -t TOKEN     api token
@@ -62,10 +61,8 @@ fn usage(short: bool) {
                time specifiers for grafana (defaults to now-1m, now)
   INTERVAL    interval in seconds between frames (defaults to <terminal rows> / TO-FROM)
   -f           follow, update data every INTERVAL seconds
-"#
-    );
-    println!(
-        "{} {} by {}",
+
+{} {} by {}"#,
         env!("CARGO_PKG_NAME"),
         env!("CARGO_PKG_VERSION"),
         env!("CARGO_PKG_AUTHORS")
@@ -373,6 +370,17 @@ fn main() {
         let query = query.as_object_mut().unwrap();
         query.insert("maxDataPoints".to_string(), rows.into());
         query.insert("intervalMs".to_string(), (interval * 1000).into());
+        if let (Some(datasource), None) = (panel.0.get("datasource"), query.get("datasource")) {
+            let mut datasource = datasource.clone();
+            if datasource.is_string() {
+                let ds = graf!(
+                    "{url}/api/datasources/name/{}",
+                    datasource.as_str().unwrap()
+                );
+                datasource = serde_json::json!({"uid": ds.0["uid"]});
+            }
+            query.insert("datasource".to_string(), datasource);
+        }
     }
     let get_values = |from: i64, to: i64| {
         let qarg = serde_json::Value::Object(serde_json::Map::from_iter([
@@ -395,14 +403,16 @@ fn main() {
             .into_iter()
             .map(|v| v.i())
             .collect();
-        let vals: Vec<Vec<_>> = vals
+        // frames -> data -> values -> _
+        let vals: Vec<Vec<Vec<_>>> = vals
             .a()
             .into_iter()
             .map(|v| {
-                v["data"]["values"][1]
+                v["data"]["values"]
                     .a()
                     .into_iter()
-                    .map(|v| v.f())
+                    .skip(1)
+                    .map(|v| v.a().into_iter().map(|v| v.f()).collect())
                     .collect()
             })
             .collect();
@@ -420,9 +430,11 @@ fn main() {
     let min = vals
         .iter()
         .flat_map(|vs| vs.iter())
+        .flat_map(|vs| vs.iter())
         .fold(f64::INFINITY, |acc, &x| if x < acc { x } else { acc });
     let max = vals
         .iter()
+        .flat_map(|vs| vs.iter())
         .flat_map(|vs| vs.iter())
         .fold(-f64::INFINITY, |acc, &x| if x > acc { x } else { acc });
     // make room for time stamps "13:04:05 "
@@ -433,7 +445,7 @@ fn main() {
     }
 
     let scale = f64::from(cols - 1) / (max - min);
-    let scale = |vals: Vec<Vec<f64>>| -> Vec<Vec<_>> {
+    let scale = |vals: Vec<Vec<Vec<f64>>>| -> Vec<Vec<Vec<_>>> {
         let scale = |v: f64| {
             let v = (v - min) * scale;
             if v.is_finite() && v >= 0.0 && v < f64::from(cols) {
@@ -444,7 +456,11 @@ fn main() {
             }
         };
         vals.into_iter()
-            .map(|vs| vs.into_iter().map(scale).collect())
+            .map(|vvs| {
+                vvs.into_iter()
+                    .map(|vs| vs.into_iter().map(scale).collect())
+                    .collect()
+            })
             .collect()
     };
     let mut scaled_vals: Vec<Vec<_>> = scale(vals);
@@ -452,7 +468,7 @@ fn main() {
     let colors = [31, 32, 33, 34, 35, 36];
     let mut i0 = 0;
     loop {
-        for i in 1..scaled_vals[0].len() {
+        for i in 1..times.len() {
             let mut hdr = vec![];
             if (i0 + i) % usize::from(rows) == 1 {
                 use std::io::Write as _;
@@ -470,7 +486,7 @@ fn main() {
             }
             let mut hdr = hdr.into_iter();
             for j in 0..cols {
-                let s = scaled_vals.iter().enumerate();
+                let s = scaled_vals.iter().flat_map(|v| v.iter()).enumerate();
                 let acc = hdr
                     .next()
                     .filter(|b| *b != b' ')
@@ -508,7 +524,7 @@ fn main() {
             return;
         }
 
-        i0 += scaled_vals.len() - 1;
+        i0 += times.len() - 1;
         from = to - interval;
         loop {
             to += interval;
