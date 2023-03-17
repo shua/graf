@@ -69,6 +69,39 @@ fn usage(short: bool) {
     );
 }
 
+// XXX: currently not defined in libc on apple targets
+#[cfg(target_os = "macos")]
+mod libc {
+    #![allow(bad_style)]
+    pub use libc::*;
+
+    #[repr(C)]
+    pub struct tm {
+        pub tm_sec: c_int,
+        pub tm_min: c_int,
+        pub tm_hour: c_int,
+        pub tm_mday: c_int,
+        pub tm_mon: c_int,
+        pub tm_year: c_int,
+        pub tm_wday: c_int,
+        pub tm_yday: c_int,
+        pub tm_isdst: c_int,
+        pub tm_gmtoff: c_long,
+        pub tm_zone: *const c_char,
+    }
+
+    extern "C" {
+        pub fn gmtime_r(time_p: *const time_t, result: *mut tm) -> *mut tm;
+        pub fn mktime(tm: *mut tm) -> time_t;
+        pub fn strftime(
+            s: *mut c_char,
+            max: size_t,
+            format: *const c_char,
+            tm: *const tm,
+        ) -> size_t;
+    }
+}
+
 pub fn timestamp<'b>(time_ms: i64, buf: &'b mut [u8; 9]) -> &'b str {
     let time = libc::time_t::from(time_ms / 1000);
 
