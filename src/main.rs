@@ -69,30 +69,14 @@ fn usage(short: bool) {
     );
 }
 
-// XXX: currently not defined in libc on apple targets
+// https://github.com/shua/graf/issues/1 libc for macos doesn't define these
+// https://github.com/rust-lang/libc/pull/3152
 #[cfg(target_os = "macos")]
 mod libc {
     #![allow(bad_style)]
     pub use libc::*;
 
-    #[repr(C)]
-    pub struct tm {
-        pub tm_sec: c_int,
-        pub tm_min: c_int,
-        pub tm_hour: c_int,
-        pub tm_mday: c_int,
-        pub tm_mon: c_int,
-        pub tm_year: c_int,
-        pub tm_wday: c_int,
-        pub tm_yday: c_int,
-        pub tm_isdst: c_int,
-        pub tm_gmtoff: c_long,
-        pub tm_zone: *const c_char,
-    }
-
     extern "C" {
-        pub fn gmtime_r(time_p: *const time_t, result: *mut tm) -> *mut tm;
-        pub fn mktime(tm: *mut tm) -> time_t;
         pub fn strftime(
             s: *mut c_char,
             max: size_t,
@@ -328,42 +312,54 @@ fn main() {
         }};
     }
 
-    fn prompt<'v>(select_a: &str, vals: &'v [Value], keys: &[&str], buf: &mut String) -> &'v Value {
+    fn prompt<'v>(select_a: &str, vals: &'v [Value], keys: &[&str]) -> &'v Value {
         use std::ops::Index as _;
-        buf.clear();
+        let mut buf = String::new();
         if vals.len() == 1 {
             return vals.index(0);
         }
         for (i, v) in vals.into_iter().enumerate() {
             print!("{i} -");
-            for key in keys {
-                print!(" {key}={}", v[key].0.to_string());
+            match v.0 {
+                serde_json::Value::Null
+                | serde_json::Value::Bool(_)
+                | serde_json::Value::Number(_)
+                | serde_json::Value::String(_) => print!("{v}"),
+                serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+                    for key in keys {
+                        print!(" {key}={}", v[key].0.to_string());
+                    }
+                }
             }
             println!();
         }
         loop {
             print!("Please select {select_a}: ");
             std::io::stdout().flush().unwrap();
-            std::io::stdin().read_line(buf).unwrap();
+            std::io::stdin().read_line(&mut buf).unwrap();
             match buf.trim().parse::<usize>() {
                 Ok(i) => return vals.index(i),
                 Err(_) => {}
             }
         }
     }
-    let mut input = String::new();
-    let mut prompt = move |select_a, vals, keys| {
-        if debug > 1 {
-            println!(
-                "prompt {select_a} from {}",
-                serde_json::to_string_pretty(unsafe {
-                    std::mem::transmute::<_, &[serde_json::Value]>(vals)
-                })
-                .unwrap()
-            );
+    // don't ask me why, but this wasn't working as a closure, but does work as
+    // a closure returned from a function
+    fn prompt1(debug: usize) -> impl for<'v> FnMut(&str, &'v [Value], &[&str]) -> &'v Value {
+        move |select_a, vals, keys| {
+            if debug > 1 {
+                println!(
+                    "prompt {select_a} from {}",
+                    serde_json::to_string_pretty(unsafe {
+                        std::mem::transmute::<_, &[serde_json::Value]>(vals)
+                    })
+                    .unwrap()
+                );
+            }
+            prompt(select_a, vals, keys)
         }
-        prompt(select_a, vals, keys, &mut input)
-    };
+    }
+    let mut prompt = prompt1(debug);
 
     let (rows, cols) = {
         let mut winsz = libc::winsize {
@@ -388,6 +384,46 @@ fn main() {
     let dash = graf!("{url}/api/dashboards/uid/{dashuid}");
     let panels = &dash["dashboard"]["panels"];
     let panel = prompt("a panel", panels.a(), &["title"]);
+    let mut templating = std::collections::HashMap::new();
+    for tmpl in dash["dashboard"]["templating"]["list"].a() {
+        let name = tmpl["name"].s();
+        println!("templating: name={name} query={}", tmpl["query"].s());
+        let q = serde_json::json!({
+            "queries": [{
+                "datasource": tmpl["datasource"].0,
+                "query": tmpl["query"].0,
+                "rawQuery": true,
+            }],
+
+            // XXX: this doesn't seem to actually limit it to values that existed in that window?
+            // for instance, I've restarted telegraf container, had two hostnames, and set the
+            // window so small that influx data only exists for the one host, but this query
+            // will return both host values. If I choose the older one, I just get back "no data".
+            "from": (from / 1000).to_string(),
+            "to": (to / 1000).to_string(),
+        });
+        let res = graf!("{url}/api/ds/query"; "-d", &q.to_string());
+        let vs: std::collections::HashSet<_> = res["results"]["A"]["frames"]
+            .a()
+            .into_iter()
+            .flat_map(|f| f["data"]["values"].a().into_iter())
+            .flat_map(|v| v.a().into_iter())
+            .map(|v| match &v.0 {
+                serde_json::Value::String(s) => s.to_string(),
+                v => v.to_string(),
+            })
+            .collect();
+        let vs: Vec<_> = vs.into_iter().map(|v| Value(v.into())).collect();
+        let v: Value = prompt(&format!("a value for ${name}"), &vs, &[]).clone();
+        templating.insert(
+            name.to_string(),
+            match v.0 {
+                serde_json::Value::String(s) => s,
+                _ => unreachable!("values were created from strings"),
+            },
+        );
+    }
+
     let target = if panel.0.get("targets").is_some() {
         prompt("a target", panel["targets"].a(), &["refId"]).clone()
     } else if let Some(datasource) = panel.0.get("datasource") {
@@ -399,6 +435,28 @@ fn main() {
 
     let refid = target["refId"].s();
     let mut query = target.0.clone();
+    fn visit_replace(v: &mut serde_json::Value, tmpls: &std::collections::HashMap<String, String>) {
+        match v {
+            serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            }
+            serde_json::Value::String(s) => {
+                for (p, to) in tmpls {
+                    *s = s.replace(&format!("${p}"), to);
+                }
+            }
+            serde_json::Value::Array(elems) => {
+                for e in elems {
+                    visit_replace(e, tmpls);
+                }
+            }
+            serde_json::Value::Object(map) => {
+                for v in map.values_mut() {
+                    visit_replace(v, tmpls);
+                }
+            }
+        }
+    }
+    visit_replace(&mut query, &templating);
     {
         let query = query.as_object_mut().unwrap();
         query.insert("maxDataPoints".to_string(), rows.into());
@@ -445,7 +503,7 @@ fn main() {
                     .a()
                     .into_iter()
                     .skip(1)
-                    .map(|v| v.a().into_iter().map(|v| v.f()).collect())
+                    .map(|v| v.a().into_iter().map(|v| v.0.as_f64()).collect())
                     .collect()
             })
             .collect();
@@ -464,11 +522,13 @@ fn main() {
         .iter()
         .flat_map(|vs| vs.iter())
         .flat_map(|vs| vs.iter())
+        .filter_map(|v| v.as_ref())
         .fold(f64::INFINITY, |acc, &x| if x < acc { x } else { acc });
     let max = vals
         .iter()
         .flat_map(|vs| vs.iter())
         .flat_map(|vs| vs.iter())
+        .filter_map(|v| v.as_ref())
         .fold(-f64::INFINITY, |acc, &x| if x > acc { x } else { acc });
     // make room for time stamps "13:04:05 "
     let cols = cols - 9;
@@ -478,7 +538,7 @@ fn main() {
     }
 
     let scale = f64::from(cols - 1) / (max - min);
-    let scale = |vals: Vec<Vec<Vec<f64>>>| -> Vec<Vec<Vec<_>>> {
+    let scale = |vals: Vec<Vec<Vec<Option<f64>>>>| -> Vec<Vec<Vec<Option<u16>>>> {
         let scale = |v: f64| {
             let v = (v - min) * scale;
             if v.is_finite() && v >= 0.0 && v < f64::from(cols) {
@@ -491,7 +551,7 @@ fn main() {
         vals.into_iter()
             .map(|vvs| {
                 vvs.into_iter()
-                    .map(|vs| vs.into_iter().map(scale).collect())
+                    .map(|vs| vs.into_iter().map(|v| v.and_then(scale)).collect())
                     .collect()
             })
             .collect()
