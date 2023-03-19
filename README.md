@@ -1,5 +1,6 @@
-USAGE
+## USAGE
 
+```
 graf [-h|--help] <-u USER:PASS|-t TOKEN> URL [--from FROM] [--to TO] [--interval SECS] [-f]
 
   select and print grafana dashboard panel to terminal
@@ -11,8 +12,13 @@ graf [-h|--help] <-u USER:PASS|-t TOKEN> URL [--from FROM] [--to TO] [--interval
                time specifiers for grafana (defaults to now-1m, now)
   INTERVAL    interval in seconds between frames (defaults to <terminal rows> / TO-FROM)
   -f           follow, update data every INTERVAL seconds
+```
 
-EXAMPLE
+## EXAMPLE
+
+[![asciicast](https://asciinema.org/a/568183.svg)](https://asciinema.org/a/568183)
+
+<!-- -------------- offline example (no pretty colours for you) -----------------
 
 $ graf http://localhost:3000 -u admin:admin --from now-1m -f
 0 - title="dash" uid="2qZKhw-4z"
@@ -43,3 +49,5 @@ Please select a panel: 1
          |               |          |    |               |               |'-----.        |       '.
 ^C
 $
+
+-->
